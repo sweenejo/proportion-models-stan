@@ -1,0 +1,152 @@
+---
+title: "Modeling proportions in Stan"
+author: "Jonathan Sweeney"
+date: "10/13/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+library(rstan)
+library(tidyverse)
+```
+
+## Why proportions?
+
+The specific example I think about often is how to model the proportion of fish catch attributed to a set of species.  Of course this is far from the only context where modeling proportions is important.  Political scientists often are tasked with modeling the share of votes for each party, and marketing analysts frequently are asked about the factors that affect the market share of particular brands.
+
+For this example, however, I'm going to think of fish.
+
+## Simulate data
+```{r}
+rtrunc_norm <- function(n, mean, sd, lower = -Inf, upper = +Inf) {
+  # This function defines a random sampling procedure for a truncated normal distribution.
+  #
+  samples <- vector(length = n)
+  for (i in 1:n) {
+    samples[i] <- rnorm(1, mean, sd)
+    while (samples[i] < lower | samples[i] > upper) {
+      samples[i] <- rnorm(1, mean, sd)
+    }
+  }
+  return(samples)
+}
+
+N <- 100 # Think of this as fishing days.  Each day, some mix of fish is caught.
+y1 <- rtrunc_norm(N, 10, 5, lower = 0) # Pounds of fish 1
+y2 <- rtrunc_norm(N, 20, 5, lower = 0) # Pounds of fish 2
+y3 <- rtrunc_norm(N, 30, 5, lower = 0) # Pounds of fish 3
+```
+
+Now, lets calculate the proportion of the daily catch for each fish type. And put it into a data set to be fit by Stan.
+
+```{r}
+prop1 <- y1 /(y1 + y2 + y3)
+prop2 <- y2 /(y1 + y2 + y3)
+prop3 <- y3 /(y1 + y2 + y3)
+
+dat <- list(N = N,
+            y1 = y1,
+            y2 = y2,
+            y3 = y3,
+            prop1 = prop1,
+            prop2 = prop2,
+            prop3 = prop3
+            )
+
+hist(dat$prop1)
+hist(dat$prop2)
+hist(dat$prop3)
+```
+
+## Dirichlet model
+
+The code below specifies the Stan code for the Dirichlet model.
+
+```{stan output.var = "dir_model", results = "hide"}
+data{
+int N;
+real prop1[N];
+real prop2[N];
+real prop3[N];
+}
+transformed data{
+real prop[N,3];
+for (i in 1:N) {
+prop[i,1] = prop1[i];
+prop[i,2] = prop2[i];
+prop[i,3] = prop3[i];
+}
+}
+parameters{
+  vector<lower = 0>[3] alpha;
+}
+model{
+for (i in 1:N)
+target += dirichlet_lpdf(to_vector(prop[i,]) | alpha);
+}
+generated quantities{
+vector[3] post_prop;
+post_prop = dirichlet_rng(alpha); // Posterior predictive check.
+}
+```
+
+Okay, it's all set up.  Let's fit the model
+
+```{r, results = "hide"}
+dir_fit <- sampling(dir_model, data = dat)
+```
+
+Let's verify our model fit by plotting the alphas and posterior predicted proportions.
+
+```{r}
+stan_dens(dir_fit)
+```
+This actually looks very good.  The posterior predicted densities line up very nicely with the historgrams of the data above.
+
+## Beta model
+
+For the next act, we'll fit the same data to three beta distribution models.  The beta distribution, can be thought of as a univariate Dirichlet, used frequently for modeling single proportional observations.  Here, we'll use three of them because we have three proportions.
+
+The Stan code for the beta model is below.  Note that unlike the Dirichlet distribution, which is specified by a single parameter vector alpha, each beta distribution takes two parameters an alpha and beta.
+
+```{stan output.var = "beta_model", results = "hide"}
+data{
+int N;
+real prop1[N];
+real prop2[N];
+real prop3[N];
+}
+transformed data{
+real prop[N,3];
+for (i in 1:N) {
+prop[i,1] = prop1[i];
+prop[i,2] = prop2[i];
+prop[i,3] = prop3[i];
+}
+}
+parameters{
+  vector<lower = 0>[3] alpha;
+  vector<lower = 0>[3] beta;
+}
+model{
+for (i in 1:3)
+target += beta_lpdf(to_vector(prop[,i]) | alpha[i], beta[i]);
+}
+generated quantities{
+vector[3] post_prop;
+for (i in 1:3) {
+post_prop[i] = beta_rng(alpha[i], beta[i]); // Posterior predictive check.
+}
+}
+```
+
+```{r, results = "hide"}
+beta_fit <- sampling(beta_model, data = dat)
+```
+
+Let's take a look at the posterior estimates, and posterior predictions.
+
+```{r}
+stan_dens(beta_fit)
+```
