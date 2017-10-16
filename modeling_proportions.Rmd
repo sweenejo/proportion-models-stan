@@ -150,3 +150,93 @@ Let's take a look at the posterior estimates, and posterior predictions.
 ```{r}
 stan_dens(beta_fit)
 ```
+
+Although I sampled from three beta distributed parameters that modeled proportional data that summed to 1, my posterior samples don't sum to 1.  Our model therefore doesn't yet accurately represent the data generating process (Thanks to Gelman for introducing me to posterior predictive checks).  We can see this problem by running the following code.
+
+```{r}
+beta_fit_data <- as.data.frame(beta_fit)
+beta_fit_data$sum <- beta_fit_data$`post_prop[1]`+ beta_fit_data$`post_prop[2]`+ beta_fit_data$`post_prop[3]`
+head(beta_fit_data)
+```
+
+We have to think more about how we can specify the model to address this problem.  One idea is to model the data as a simplex.
+
+```{stan output.var = "beta_model_simplex", results = "hide"}
+data{
+int N;
+real prop1[N];
+real prop2[N];
+real prop3[N];
+}
+transformed data{
+simplex[3] prop[N];
+for (i in 1:N) {
+prop[i,1] = prop1[i];
+prop[i,2] = prop2[i];
+prop[i,3] = prop3[i];
+}
+}
+parameters{
+  vector<lower = 0>[3] alpha;
+  vector<lower = 0>[3] beta;
+}
+model{
+for (i in 1:3)
+target += beta_lpdf(to_vector(prop[,i]) | alpha[i], beta[i]);
+}
+generated quantities{
+vector[3] post_prop;
+for (i in 1:3) {
+post_prop[i] = beta_rng(alpha[i], beta[i]); // Posterior predictive check.
+}
+}
+```
+
+```{r, results = "hide"}
+beta_fit_simplex <- sampling(beta_model_simplex, data = dat)
+```
+
+```{r}
+beta_fit_simplex_data <- as.data.frame(beta_fit_simplex)
+beta_fit_simplex_data$sum <- beta_fit_simplex_data$`post_prop[1]`+ beta_fit_simplex_data$`post_prop[2]`+ beta_fit_simplex_data$`post_prop[3]`
+head(beta_fit_simplex_data)
+```
+
+Nope, that didn't work.  However, because we know the data is a simplex, that means we only need to model p-1 parameters.  If we define a beta distribution for the first and second, the third is given.  This means we only need to sample two parameters, and the third will be what's left over, ensuring our posterior predictions sum to 1.
+
+```{stan output.var = "beta_model_2", results = "hide"}
+data{
+int N;
+real prop1[N];
+real prop2[N];
+}
+transformed data{
+real prop[N,2];
+for (i in 1:N) {
+prop[i,1] = prop1[i];
+prop[i,2] = prop2[i];
+}
+}
+parameters{
+  vector<lower = 0>[2] alpha;
+  vector<lower = 0>[2] beta;
+}
+model{
+for (i in 1:2)
+target += beta_lpdf(to_vector(prop[,i]) | alpha[i], beta[i]);
+}
+generated quantities{
+vector[2] post_prop;
+for (i in 1:2) {
+post_prop[i] = beta_rng(alpha[i], beta[i]); // Posterior predictive check.
+}
+}
+```
+
+```{r, results = "hide"}
+beta_fit_2 <- sampling(beta_model_2, data = dat)
+beta_fit_2_data <- as.data.frame(beta_fit_2)
+beta_fit_2_data$p3 <- 1 - (beta_fit_2_data$`post_prop[1]`+ beta_fit_2_data$`post_prop[2]`)
+beta_fit_2_data$sum <- beta_fit_2_data$p3+beta_fit_2_data$`post_prop[1]`+ beta_fit_2_data$`post_prop[2]`
+head(beta_fit_2_data)
+```
