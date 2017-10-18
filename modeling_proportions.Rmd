@@ -2,7 +2,7 @@
 title: "Modeling proportions in Stan"
 author: "Jonathan Sweeney"
 date: "10/13/2017"
-output: html_document
+output: md_document
 ---
 
 ```{r setup, include=FALSE}
