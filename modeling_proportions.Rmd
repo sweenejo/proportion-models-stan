@@ -2,7 +2,9 @@
 title: "Modeling proportions in Stan"
 author: "Jonathan Sweeney"
 date: "10/13/2017"
-output: md_document
+output:
+  md_document:
+    variant: markdown_github
 ---
 
 ```{r setup, include=FALSE}
@@ -303,8 +305,87 @@ post_prop[2] = beta_rng(alpha2, beta2);
 }
 ```
 
-```{r}
+```{r, results = "hide"}
 beta_fit_x <- sampling(beta_model_x, data = dat_x)
+```
+
+```{r}
 print(beta_fit_x)
 stan_dens(beta_fit_x)
+```
+
+## Zero-inflated Beta regression
+
+Turns out Stan doesn't like 0's in the beta distribution, as the log probability evaluates to negative infinity.  To handle O's in our data, we need to model them seperately as a bernoulli.
+
+Below, we force our data to have a zero.
+
+```{r}
+prop1[100] <- 0
+dat_mixture <- list(N = N,
+            x = x,
+            y1 = y1,
+            y2 = y2,
+            y3 = y3,
+            prop1 = prop1,
+            prop2 = prop2,
+            prop3 = prop3
+            )
+```
+
+Now we'll redefine our Stan model to include the Bernoulli addition.
+
+```{stan output.var = "beta_model_mixture", results = "hide"}
+data{
+int N;
+real prop1[N];
+real prop2[N];
+real x[N];
+}
+transformed data{
+real prop[N,2];
+for (i in 1:N) {
+prop[i,1] = prop1[i];
+prop[i,2] = prop2[i];
+}
+}
+parameters{
+  real<lower = 0, upper = 1> omega; // Bernoulli zero-inflation parameter.
+  real<lower = 0> alpha2;
+  real<lower = 0> beta2;
+  real<lower = 0> phi;
+  real<lower = 0> mu;
+  real<lower = 0> b;
+}
+transformed parameters{
+  real<lower = 0> alpha1;
+  real<lower = 0> beta1;
+  alpha1 = mu * phi;
+  beta1 = (1 - mu) * phi;
+}
+model{
+for (i in 1:N) {
+if (prop[i,1] == 0) {
+target += bernoulli_lpmf(0 | omega);
+}
+else{
+  target += exponential_lpdf(mu | b * x[i]);
+  target += beta_lpdf(prop[i,1] | alpha1, beta1);
+  target += beta_lpdf(prop[i,2] | alpha2, beta2);
+}
+}
+}
+generated quantities{
+vector[2] post_prop;
+post_prop[1] = beta_rng(alpha1, beta1); // Posterior predictive check.
+post_prop[2] = beta_rng(alpha2, beta2);
+}
+```
+```{r, results = "hide"}
+beta_fit_mixture <- sampling(beta_model_mixture, data = dat_mixture)
+```
+
+```{r}
+print(beta_fit_mixture)
+stan_dens(beta_fit_mixture)
 ```
