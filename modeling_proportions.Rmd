@@ -161,50 +161,7 @@ beta_fit_data$sum <- beta_fit_data$`post_prop[1]`+ beta_fit_data$`post_prop[2]`+
 head(beta_fit_data)
 ```
 
-We have to think more about how we can specify the model to address this problem.  One idea is to model the data as a simplex.
-
-```{stan output.var = "beta_model_simplex", results = "hide"}
-data{
-int N;
-real prop1[N];
-real prop2[N];
-real prop3[N];
-}
-transformed data{
-simplex[3] prop[N];
-for (i in 1:N) {
-prop[i,1] = prop1[i];
-prop[i,2] = prop2[i];
-prop[i,3] = prop3[i];
-}
-}
-parameters{
-  vector<lower = 0>[3] alpha;
-  vector<lower = 0>[3] beta;
-}
-model{
-for (i in 1:3)
-target += beta_lpdf(to_vector(prop[,i]) | alpha[i], beta[i]);
-}
-generated quantities{
-vector[3] post_prop;
-for (i in 1:3) {
-post_prop[i] = beta_rng(alpha[i], beta[i]); // Posterior predictive check.
-}
-}
-```
-
-```{r, results = "hide"}
-beta_fit_simplex <- sampling(beta_model_simplex, data = dat)
-```
-
-```{r}
-beta_fit_simplex_data <- as.data.frame(beta_fit_simplex)
-beta_fit_simplex_data$sum <- beta_fit_simplex_data$`post_prop[1]`+ beta_fit_simplex_data$`post_prop[2]`+ beta_fit_simplex_data$`post_prop[3]`
-head(beta_fit_simplex_data)
-```
-
-Nope, that didn't work.  However, because we know the data is a simplex, that means we only need to model p-1 parameters.  If we define a beta distribution for the first and second, the third is given.  This means we only need to sample two parameters, and the third will be what's left over, ensuring our posterior predictions sum to 1.
+However, because we know the data are a simplex, that means we only need to model p-1 parameters.  If we define a beta distribution for the first and second, the third is given.  This means we only need to sample two parameters, and the third will be what's left over, ensuring our posterior predictions sum to 1.
 
 ```{stan output.var = "beta_model_2", results = "hide"}
 data{
@@ -250,15 +207,17 @@ What if we observed predictors of our proportional observations?  Greg Snow intr
 We'll need to first simulate some additional data for the predictors.  Let's assume the predictor $x$, is positively related to proportion of output 1.
 
 ```{r}
-x <- 1.5 * y1
+N = 100
+x = rnorm(N)
+b = 0.2
+mu = plogis(x * b)  # add noise if desired + rnorm(N, sd=.01)
+phi = 15
+A = mu*phi
+B = (1-mu)*phi
+y = rbeta(N, A, B)
 dat_x <- list(N = N,
             x = x,
-            y1 = y1,
-            y2 = y2,
-            y3 = y3,
-            prop1 = prop1,
-            prop2 = prop2,
-            prop3 = prop3
+            y = y
             )
 ```
 
@@ -267,41 +226,37 @@ Now, the new reparameterized Stan model.
 ```{stan output.var = "beta_model_x", results = "hide"}
 data{
 int N;
-real prop1[N];
-real prop2[N];
+real y[N];
 real x[N];
 }
-transformed data{
-real prop[N,2];
-for (i in 1:N) {
-prop[i,1] = prop1[i];
-prop[i,2] = prop2[i];
-}
-}
 parameters{
-  real<lower = 0> alpha2;
-  real<lower = 0> beta2;
   real<lower = 0> phi;
-  real<lower = 0> mu;
   real<lower = 0> b;
 }
 transformed parameters{
-  real<lower = 0> alpha1;
-  real<lower = 0> beta1;
-  alpha1 = mu * phi;
-  beta1 = (1 - mu) * phi;
+  real<lower = 0, upper = 1> mu[N];
+  for (i in 1:N) {
+  mu[i] = inv_logit(b * x[i]);
+  }
 }
 model{
 for (i in 1:N) {
-  target += exponential_lpdf(mu | b * x[i]);
-  target += beta_lpdf(prop[i,1] | alpha1, beta1);
-  target += beta_lpdf(prop[i,2] | alpha2, beta2);
+  target += beta_lpdf(y[i] | mu[i] * phi, (1 - mu[i]) * phi);
 }
 }
 generated quantities{
-vector[2] post_prop;
-post_prop[1] = beta_rng(alpha1, beta1); // Posterior predictive check.
-post_prop[2] = beta_rng(alpha2, beta2);
+  real post_y;
+  {
+  real x_sim;
+  real mu_sim;
+  real alpha_sim;
+  real beta_sim;
+  x_sim = normal_rng(mean(x), sd(x));
+  mu_sim = inv_logit(b * x_sim);
+  alpha_sim = mu_sim * phi;
+  beta_sim = (1 - mu_sim) * phi;
+  post_y = beta_rng(alpha_sim, beta_sim);
+  }
 }
 ```
 
@@ -310,27 +265,19 @@ beta_fit_x <- sampling(beta_model_x, data = dat_x)
 ```
 
 ```{r}
-print(beta_fit_x)
-stan_dens(beta_fit_x)
+print(beta_fit_x, pars = c("phi", "b","post_y"))
+stan_dens(beta_fit_x, pars = c("phi", "b","post_y"))
 ```
 
 ## Zero-inflated Beta regression
 
-Turns out Stan doesn't like 0's in the beta distribution, as the log probability evaluates to negative infinity.  To handle O's in our data, we need to model them seperately as a bernoulli.
+Turns out Stan doesn't like 0's in the beta distribution, as the log probability evaluates to negative infinity.  To handle O's in our data, we need to model them seperately as a Bernoulli.
 
 Below, we force our data to have a zero.
 
 ```{r}
-prop1[100] <- 0
-dat_mixture <- list(N = N,
-            x = x,
-            y1 = y1,
-            y2 = y2,
-            y3 = y3,
-            prop1 = prop1,
-            prop2 = prop2,
-            prop3 = prop3
-            )
+dat_mixture = dat_x
+dat_mixture$y[[1]] = 0
 ```
 
 Now we'll redefine our Stan model to include the Bernoulli addition.
@@ -338,55 +285,95 @@ Now we'll redefine our Stan model to include the Bernoulli addition.
 ```{stan output.var = "beta_model_mixture", results = "hide"}
 data{
 int N;
-real prop1[N];
-real prop2[N];
+real y[N];
 real x[N];
 }
-transformed data{
-real prop[N,2];
-for (i in 1:N) {
-prop[i,1] = prop1[i];
-prop[i,2] = prop2[i];
-}
-}
 parameters{
-  real<lower = 0, upper = 1> omega; // Bernoulli zero-inflation parameter.
-  real<lower = 0> alpha2;
-  real<lower = 0> beta2;
   real<lower = 0> phi;
-  real<lower = 0> mu;
   real<lower = 0> b;
+  real<lower = 0, upper = 1> theta;
 }
 transformed parameters{
-  real<lower = 0> alpha1;
-  real<lower = 0> beta1;
-  alpha1 = mu * phi;
-  beta1 = (1 - mu) * phi;
+  real<lower = 0, upper = 1> mu[N];
+  for (i in 1:N) {
+  mu[i] = inv_logit(b * x[i]);
+  }
 }
 model{
 for (i in 1:N) {
-if (prop[i,1] == 0) {
-  target += bernoulli_lpmf(0 | omega);
-}
-else{
-  target += bernoulli_lpmf(1 | omega);
-  target += exponential_lpdf(mu | b * x[i]);
-  target += beta_lpdf(prop[i,1] | alpha1, beta1);
-  target += beta_lpdf(prop[i,2] | alpha2, beta2);
-}
+  if (y[i] == 0) {
+  target += bernoulli_lpmf(1 | theta);
+  }
+  else {
+  target += bernoulli_lpmf(0 | theta) 
+  + beta_lpdf(y[i] | mu[i] * phi, (1 - mu[i]) * phi);
+  }
 }
 }
 generated quantities{
-vector[2] post_prop;
-post_prop[1] = beta_rng(alpha1, beta1); // Posterior predictive check.
-post_prop[2] = beta_rng(alpha2, beta2);
+  real post_y;
+  {
+  real x_sim;
+  real mu_sim;
+  real alpha_sim;
+  real beta_sim;
+  x_sim = normal_rng(mean(x), sd(x));
+  mu_sim = inv_logit(b * x_sim);
+  alpha_sim = mu_sim * phi;
+  beta_sim = (1 - mu_sim) * phi;
+  post_y = beta_rng(alpha_sim, beta_sim);
+  }
 }
 ```
+
 ```{r, results = "hide"}
 beta_fit_mixture <- sampling(beta_model_mixture, data = dat_mixture)
 ```
 
 ```{r}
-print(beta_fit_mixture)
-stan_dens(beta_fit_mixture)
+print(beta_fit_mixture, pars = c("theta", "phi", "b", "post_y"))
+stan_dens(beta_fit_mixture, pars = c("theta", "phi", "b", "post_y"))
+```
+
+## Normal model on the logit scale
+
+An alternative the the beta model would be a simple normal model on the logit scale.  I am still working on the below model.
+
+```{stan output.var = "normal_logit", results = "hide"}
+data{
+int N;
+real prop1[N];
+real prop2[N];
+real prop3[N];
+real x[N];
+}
+transformed data{
+vector[3] prop[N];
+for (i in 1:N) {
+prop[i,1] = prop1[i];
+prop[i,2] = prop2[i];
+prop[i,3] = prop3[i];
+}
+}
+parameters{
+  corr_matrix[3] Omega; // prior correlation
+  vector<lower=0>[3] tau; // prior scale
+  vector[3] b;
+}
+transformed parameters{
+  vector[3] theta;
+  for (i in 1:N) {
+  theta = softmax(to_vector(prop[i,]));
+  }
+}
+model{
+for (i in 1:N) {
+target += multi_normal_lpdf(prop[i,] | b * x[i], quad_form_diag(Omega, tau));
+}
+}
+generated quantities{
+}
+```
+```{r, results = "hide"}
+#normal_logit_fit <- sampling(normal_logit, data = dat_x)
 ```
